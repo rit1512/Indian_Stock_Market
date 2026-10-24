@@ -1,6 +1,6 @@
 # The Day Trader skill
 
-11 Claude skills for day trading: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
+12 Claude skills for day trading in the US and India: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
 
 Free, MIT, no signup, no API key. The tools are plain Python that read free
 public data: Yahoo Finance charts, Nasdaq Trader's symbol lists, SEC EDGAR
@@ -57,7 +57,7 @@ The tools need Python 3.8 or newer. Nothing to pip install. The SEC tools
 email in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`)
 or in the `SEC_USER_AGENT` environment variable.
 
-## The eleven
+## The twelve
 
 | command | job | what it does |
 | --- | --- | --- |
@@ -72,6 +72,7 @@ or in the `SEC_USER_AGENT` environment variable.
 | `/trader-alerts` | Price Alerts | Rings when a price, a stop or the opening bell hits. |
 | `/trader-analyst` | Earnings Analyst | Reads earnings reports and sums up what changed. |
 | `/trader-pelosi` | Pelosi Tracker | Reads Congress's stock-trade disclosures the minute they are filed. |
+| `/trader-india` | Indian Share Market | Live NSE and BSE data: the NSE clock in IST, quotes in rupees, NIFTY, BANK NIFTY, SENSEX and INDIA VIX, top movers, a NIFTY 50 opening-range scan and sizing with Indian intraday charges. |
 
 ## How to use it
 
@@ -141,6 +142,12 @@ python3 trader-alerts/alerts.py add --from-plan                        # stop, t
 python3 trader-alerts/alerts.py check                                  # rings what hit, once
 python3 trader-analyst/facts.py TSLA                                   # quarters, growth, EPS
 python3 trader-pelosi/ptr.py index --member pelosi                     # her PTRs this year
+python3 trader-india/india.py clock --live                             # NSE open? (IST)
+python3 trader-india/india.py quote RELIANCE TCS NIFTY                 # NSE prices in rupees
+python3 trader-india/india.py indices                                  # NIFTY, BANK NIFTY, VIX, breadth
+python3 trader-india/india.py movers --index NIFTY                     # top gainers and losers
+python3 trader-india/india.py orb --at 09:45                           # NIFTY 50 opening-range breaks
+python3 trader-india/india.py size --entry 1190 --stop 1183 --max-loss 500  # shares, charges included
 ```
 
 ```bash
@@ -193,6 +200,14 @@ set `"pdt_guard": true` and `/trader-risk` counts your day trades.
 trades over $1,000 within 45 days (the STOCK Act). The Pelosi skill reads those
 public filings the minute they post.
 
+**The Indian market.** `/trader-india` reads NSE's own website feeds and
+Yahoo's `.NS` and `.BO` charts. Both are free and unofficial, and NSE can
+block or change them without notice. It has its own IST clock, rupee
+limits and charges (`trader-india/config.example.json`). The US skills'
+NYSE clock, dollar limits and Alpaca broker do not apply to Indian trades.
+Orders go through your own Indian broker, only with your yes. SEBI found
+that about 7 in 10 individual intraday equity traders lost money in FY2023.
+
 **Taxes.** Day-trading gains are short-term gains, and frequent trading makes
 wash sales likely. Nothing here is tax advice.
 
@@ -210,6 +225,7 @@ trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json
 trader-pelosi/      SKILL.md, ptr.py
+trader-india/       SKILL.md, india.py, config.example.json
 tests/              unittest suite + offline fixtures
 ```
 

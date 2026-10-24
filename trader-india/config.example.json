@@ -1,0 +1,23 @@
+{
+  "capital_inr": 50000,
+  "max_loss_per_trade_inr": 500,
+  "max_daily_loss_inr": 1500,
+  "max_trades_per_day": 3,
+  "no_entries_before": "09:30",
+  "no_entries_after": "14:45",
+  "flat_by": "15:10",
+  "exchange": "nse",
+  "paper": true,
+  "allow_short": false,
+  "allow_margin": false,
+  "allow_options": false,
+  "charges": {
+    "brokerage_pct": 0.03,
+    "brokerage_max": 20.0,
+    "stt_sell_pct": 0.025,
+    "txn_pct": {"nse": 0.00307, "bse": 0.00375},
+    "sebi_per_crore": 10.0,
+    "stamp_buy_pct": 0.003,
+    "gst_pct": 18.0
+  }
+}
