@@ -15,9 +15,17 @@
     "brokerage_pct": 0.03,
     "brokerage_max": 20.0,
     "stt_sell_pct": 0.025,
-    "txn_pct": {"nse": 0.00307, "bse": 0.00375},
+    "txn_pct": {
+      "nse": 0.00307,
+      "bse": 0.00375
+    },
     "sebi_per_crore": 10.0,
     "stamp_buy_pct": 0.003,
     "gst_pct": 18.0
-  }
+  },
+  "swing_max_loss_inr": 1000,
+  "swing_max_positions": 3,
+  "swing_min_score": 7,
+  "results_block_days": 7,
+  "atr_stop": 2.0
 }

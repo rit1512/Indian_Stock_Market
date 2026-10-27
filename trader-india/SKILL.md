@@ -9,7 +9,10 @@ description: >-
   and losers for NIFTY, BANK NIFTY, NIFTY NEXT 50 and F&O stocks, a
   15-minute opening-range breakout and breakdown scan of the NIFTY 50, and
   position sizing in rupees with the real intraday costs (brokerage, STT,
-  exchange charges, SEBI fee, stamp duty, GST). Use when the user mentions
+  exchange charges, SEBI fee, stamp duty, GST), plus a live local dashboard
+  with candle charts, NIFTY 50 setups with entry, stop and target, and
+  NIFTY / BANK NIFTY call and put setups from the option chain (PCR, max
+  pain, OI walls). Use when the user mentions
   NSE, BSE, NIFTY, SENSEX, BANK NIFTY, India VIX, Indian stocks or shares,
   rupees, Zerodha, Kite, Upstox, Groww, intraday or MIS, a ticker like
   RELIANCE, TCS, INFY or HDFCBANK, "is the Indian market open", "top
@@ -38,6 +41,93 @@ python3 "${CLAUDE_SKILL_DIR}/india.py" orb --at 09:45                     # open
 python3 "${CLAUDE_SKILL_DIR}/india.py" orb SBIN TCS --date 2026-10-23 --at 10:15
 python3 "${CLAUDE_SKILL_DIR}/india.py" size --entry 1190 --stop 1183 --target 1204 --max-loss 500
 ```
+
+## The dashboard
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/dashboard.py"            # http://127.0.0.1:8765, opens the browser
+python3 "${CLAUDE_SKILL_DIR}/dashboard.py" --port 9000 --no-open
+```
+
+A live page on the user's own computer (it listens on 127.0.0.1 only). NIFTY
+and BANK NIFTY prices update every second (one small Yahoo request; it backs
+off to 30 s if Yahoo pushes back, and the page says so); everything else
+every 30 seconds:
+
+- the market regime: NIFTY's daily trend against its 50- and 200-day
+  averages, INDIA VIX, breadth, the put-call ratio and FII / DII net flows
+- index cards (NIFTY, BANK NIFTY, FIN NIFTY, midcap, smallcap, IT, INDIA VIX)
+  and NSE breadth
+- 5-minute candle charts of NIFTY and BANK NIFTY, the last candle moving
+  with each tick, with the opening range and the 20-bar EMA, and the bias
+  the option rule reads from them
+- NIFTY and BANK NIFTY options: the nearest expiry that is not today, ATM
+  call and put premiums and IV, PCR, max pain, the call and put OI walls
+  within 5 % of spot, an OI ladder, and the option setup (below)
+- two tabs of NIFTY 50 setups, the top picks starred, each row with entry,
+  stop, target, quantity, rupees at risk, reward to risk and PASS / BLOCK:
+  **Intraday** (click for the 5-minute chart with VWAP and the levels) and
+  **Short term, 2 to 15 days** (click for the 1-year daily chart with the
+  20 / 50 / 200-day averages, the fundamentals and the next results date)
+- NSE movers; capital and max loss boxes that re-size everything at once
+
+The first NIFTY 50 scan takes about 35 seconds and the short-term screen
+about a minute after that; rows fill in as they arrive. `#swing` at the end of
+the address opens the short-term tab. Tell the user to keep the terminal open
+while they use it, and Ctrl+C stops it.
+
+**Intraday setups** (long only, score out of 8): stop at the range low,
+target 2x the risk; entry is the last price while the breakout holds, else a
+buy-stop at the breakout close. +2 still above the range, +1 above VWAP, +1
+breakout volume 1.5x the session median, +1 NIFTY bullish, +1 reward to risk
+1.8 or more after charges, +1 the stock's daily trend is up, +1 beating the
+NIFTY today. BLOCK on the stock's results day. Warnings: 5-minute RSI above
+80, results tomorrow, a bearish market regime. A pick is a PASS scoring 5 or
+more, at most `max_trades_per_day` of them.
+
+**Short-term setups** (`technicals.py`, long only, delivery charges, score
+out of 10): needs a daily uptrend (close and 50-day above the 200-day), RSI
+75 or less, and a trigger: a breakout (close above the prior 55-day high on
+1.5x the 20-day average volume) or a pullback (within 1 ATR of the 20-day
+average, RSI 40 to 60, MACD histogram rising). Stop 2 ATR below the entry,
+target 2x the risk. Technical 6 (uptrend 2, above the 50-day 1, trigger 1,
+MACD 1, beating the NIFTY over 3 months 1), fundamental 3 (from the last
+annual report: revenue and profit growth, ROE 12 % or more, profitable, and
+for non-financials debt to equity 1 or less and free cash flow positive;
+3 x the share passed, rounded down), market 1 (bullish regime). BLOCK when
+results or a board meeting fall within 7 days (gap risk) or the regime is
+bearish. A pick is a PASS scoring 7 or more, at most 3.
+
+**The market regime**: bullish when NIFTY is above its 200-day with the
+50-day above the 200-day, and above its 50-day; bearish when below both;
+otherwise neutral. INDIA VIX above 20 is high risk, below 13 low.
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/technicals.py" market          # the regime, in the chat
+python3 "${CLAUDE_SKILL_DIR}/technicals.py" swing           # the short-term screen, about a minute
+python3 "${CLAUDE_SKILL_DIR}/technicals.py" swing BEL TCS --json
+```
+
+Fundamentals come from Yahoo's fundamentals time series (annual figures; the
+quarterly ones are patchy for Indian stocks), results dates from NSE's event
+calendar (`/api/event-calendar`), FII / DII flows from `/api/fiidiiTradeReact`.
+Delivery charges from zerodha.com/charges (2026-10-24): no brokerage, STT 0.1 %
+on both sides, stamp duty 0.015 % on the buy, DP Rs 15.34 per scrip sold.
+
+**Option setups**: index above its range high and its EMA: buy the ATM call;
+below the range low and the EMA: buy the ATM put; anything else: no trade.
+Exit when the index gets back to the middle of its range; target 2x that
+distance. Premiums at the stop and target are estimates (delta 0.5). Lots are
+sized to the max loss: one NIFTY lot often risks more than Rs 500, and then
+it says BLOCK. Lot sizes come from NSE's `fo_mktlots.csv` (NIFTY 65, BANK
+NIFTY 30 on 2026-10-27). Expiry-day options are skipped on purpose.
+Options stay BLOCK unless `"allow_options": true` is in the config.
+
+When the user asks what to buy, intraday or short term, start with the
+market regime, then the picks with their numbers, their score broken down and
+every BLOCK reason and warning. Say what they are: the output of these rules,
+not a forecast. When nothing passes, say so plainly and why (a bearish
+market, results next week); "no trade" is a valid answer.
 
 Every command takes `--json`. `--now "2026-10-23 09:45"` pins the clock (IST);
 `--offline DIR` reads saved files instead of the network. Quote symbols with
@@ -145,19 +235,21 @@ needed. It never changes the max loss.
 - Prices are in rupees. Write `Rs` (or the rupee sign) and Indian grouping
   (`Rs 1,00,000`), never dollars.
 - Every price carries its IST time. Never call a free quote "real time".
-- Lot sizes, F&O, options and expiry-day trading are out of scope here.
-- A scan result is a fact about a chart, not a tip.
+- Options are index options on NIFTY and BANK NIFTY only, bought, never
+  sold (no option writing), and never on their expiry day.
+- A scan result or a pick is a fact about a chart and a rule, not a tip.
 
 ## What it never does
 
-It never places, changes or cancels an order. It never recommends a stock,
-never predicts a price and never claims a quote is live.
+It never places, changes or cancels an order. It never presents a pick as a
+prediction, never predicts a price and never claims a quote is live.
 
 ## Safety
 
 - Education and tooling, not financial advice. SEBI's study of FY2023 found
-  about 70 % of individual intraday equity traders lost money. Say so if the
-  user is new.
+  about 70 % of individual intraday equity traders lost money, and its
+  study of FY22 to FY24 found 93 % of individual F&O traders did. Say so if
+  the user is new, and before any option setup.
 - Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
 - No order goes through without the user's explicit yes for that exact order in the chat, plus the
   connector's own approval card. Never set an order tool to "Always allow".

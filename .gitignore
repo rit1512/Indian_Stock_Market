@@ -1,0 +1,6 @@
+# local Claude Code settings
+.claude/settings.local.json
+# what the tools write while you use them
+trader/
+__pycache__/
+*.pyc

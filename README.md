@@ -72,7 +72,7 @@ or in the `SEC_USER_AGENT` environment variable.
 | `/trader-alerts` | Price Alerts | Rings when a price, a stop or the opening bell hits. |
 | `/trader-analyst` | Earnings Analyst | Reads earnings reports and sums up what changed. |
 | `/trader-pelosi` | Pelosi Tracker | Reads Congress's stock-trade disclosures the minute they are filed. |
-| `/trader-india` | Indian Share Market | Live NSE and BSE data: the NSE clock in IST, quotes in rupees, NIFTY, BANK NIFTY, SENSEX and INDIA VIX, top movers, a NIFTY 50 opening-range scan and sizing with Indian intraday charges. |
+| `/trader-india` | Indian Share Market | Live NSE and BSE data: the NSE clock in IST, quotes in rupees, NIFTY, BANK NIFTY, SENSEX and INDIA VIX, top movers, a NIFTY 50 opening-range scan, sizing with Indian intraday charges, short-term (2 to 15 day) setups from technicals, fundamentals and the market regime, and a live dashboard with 1-second NIFTY / BANK NIFTY charts, intraday and short-term picks and option setups. |
 
 ## How to use it
 
@@ -148,6 +148,9 @@ python3 trader-india/india.py indices                                  # NIFTY, 
 python3 trader-india/india.py movers --index NIFTY                     # top gainers and losers
 python3 trader-india/india.py orb --at 09:45                           # NIFTY 50 opening-range breaks
 python3 trader-india/india.py size --entry 1190 --stop 1183 --max-loss 500  # shares, charges included
+python3 trader-india/technicals.py market                              # regime: trend, VIX, breadth, FII/DII
+python3 trader-india/technicals.py swing                               # short-term screen, NIFTY 50
+python3 trader-india/dashboard.py                                      # live dashboard, 127.0.0.1:8765
 ```
 
 ```bash
@@ -225,7 +228,7 @@ trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json
 trader-pelosi/      SKILL.md, ptr.py
-trader-india/       SKILL.md, india.py, config.example.json
+trader-india/       SKILL.md, india.py, technicals.py, dashboard.py, dashboard.html, config.example.json
 tests/              unittest suite + offline fixtures
 ```
 
