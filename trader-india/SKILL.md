@@ -106,7 +106,15 @@ otherwise neutral. INDIA VIX above 20 is high risk, below 13 low.
 python3 "${CLAUDE_SKILL_DIR}/technicals.py" market          # the regime, in the chat
 python3 "${CLAUDE_SKILL_DIR}/technicals.py" swing           # the short-term screen, about a minute
 python3 "${CLAUDE_SKILL_DIR}/technicals.py" swing BEL TCS --json
+python3 "${CLAUDE_SKILL_DIR}/technicals.py" events HINDUNILVR APOLLOHOSP   # results today or soon
 ```
+
+**The routine box** at the top of the dashboard runs a prompt (by default the
+full intraday routine) through Claude Code in print mode when the user clicks
+Refresh, and shows the report there. Its tools are limited to `python3` (these
+scripts), reading and web search: it can never place an order. Each run costs
+about what one chat answer does (about $0.40 on 2026-10-28) and takes 1 to 3
+minutes; one run at a time.
 
 Fundamentals come from Yahoo's fundamentals time series (annual figures; the
 quarterly ones are patchy for Indian stocks), results dates from NSE's event
@@ -221,7 +229,11 @@ needed. It never changes the max loss.
    an opinion.
 4. For a setup the user picks: stop at the other side of the range (or the
    user's level), target from the user's reward to risk, then `size`.
-   Show the shares, rupees at risk, charges and reward to risk.
+   Show the shares, rupees at risk, charges and reward to risk. Always run
+   `technicals.py events SYM1 SYM2 ...` for the candidates first: a stock
+   reporting results or holding a board meeting today is BLOCK (results-day
+   swings), even when the user's own rules do not mention it; one reporting
+   tomorrow gets a warning. Skip a BLOCKed one and take the next breakout.
 5. Check it against `trader/india/config.json`: max loss, trades per day,
    `no_entries_after`, `flat_by`. Say PASS or BLOCK and why.
 6. The order is the user's to place in their own broker app. If a broker

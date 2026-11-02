@@ -171,6 +171,13 @@ def parse_flows(doc):
     return out
 
 
+def events_path(today, days=15):
+    """NSE's event calendar from today. Its plain URL starts TOMORROW, so a company reporting
+    today, the case that matters most, would be missing without the dates."""
+    return "event-calendar?index=equities&from_date=%s&to_date=%s" % (
+        today.strftime("%d-%m-%Y"), (today + datetime.timedelta(days=days)).strftime("%d-%m-%Y"))
+
+
 def parse_events(doc, symbols=None):
     """NSE event calendar -> {SYMBOL: [(date, purpose)]}, soonest first."""
     out = {}
@@ -421,11 +428,11 @@ def cmd_swing(a):
     for r in india.csv.DictReader(india.io.StringIO(text.lstrip("﻿"))):
         industry[(r.get("Symbol") or "").strip().upper()] = (r.get("Industry") or "").strip()
     syms = syms or list(industry)
+    today = india.to_ist(india.parse_now(a.now)).date()
     try:
-        events = parse_events(india.nse_doc("event-calendar", a.offline), set(syms))
+        events = parse_events(india.nse_doc(events_path(today), a.offline), set(syms))
     except IndiaError:
         events = {}
-    today = india.to_ist(india.parse_now(a.now)).date()
     rows, errors = [], []
     for i, s in enumerate(syms):
         y = india.yahoo_symbol(s)
@@ -463,24 +470,46 @@ def cmd_swing(a):
     return 0
 
 
+def cmd_events(a):
+    """Results and board meetings from today through --days, for the symbols given (default: all)."""
+    today = india.to_ist(india.parse_now(a.now)).date()
+    syms = set(s.upper() for s in a.symbols) or None
+    ev = parse_events(india.nse_doc(events_path(today, a.days), a.offline), syms)
+    rows = sorted((e["date"], s, e["purpose"], e["in_days"]) for s in ev
+                  for e in [next_event(ev, s, today, a.days)] if e)
+    if a.json:
+        print(json.dumps([{"symbol": s, "date": d, "purpose": p, "in_days": n} for d, s, p, n in rows], indent=2))
+        return 0
+    print("NSE event calendar, %s to %s:" % (today.isoformat(), (today + datetime.timedelta(days=a.days)).isoformat()))
+    for d, s, p, n in rows:
+        print("  %-11s %s  %-40s %s" % (s, d, p[:40], "TODAY: results-day swings, no intraday entry" if n == 0
+                                         else "in %d day(s)" % n))
+    if not rows:
+        print("  nothing for %s" % (", ".join(sorted(syms)) if syms else "any symbol"))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Technical, fundamental and market checks (trader-india).")
     sub = ap.add_subparsers(dest="cmd")
-    for name in ("market", "swing"):
+    for name in ("market", "swing", "events"):
         p = sub.add_parser(name)
         p.add_argument("--offline", metavar="DIR")
         p.add_argument("--now")
         p.add_argument("--json", action="store_true")
         p.add_argument("--config", default="trader/india/config.json")
+        if name in ("swing", "events"):
+            p.add_argument("symbols", nargs="*", help="default: the NIFTY 50" if name == "swing" else "default: all")
         if name == "swing":
-            p.add_argument("symbols", nargs="*", help="default: the NIFTY 50")
             p.add_argument("--top", type=int, default=15)
+        if name == "events":
+            p.add_argument("--days", type=int, default=7)
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 1
     try:
-        return {"market": cmd_market, "swing": cmd_swing}[a.cmd](a)
+        return {"market": cmd_market, "swing": cmd_swing, "events": cmd_events}[a.cmd](a)
     except IndiaError as e:
         print("technicals.py: %s" % e, file=sys.stderr)
         return 1

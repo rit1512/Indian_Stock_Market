@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NSE Desk</title>
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
 <style>
 :root {
   --bg: #0d1117; --panel: #161b22; --line: #262d36; --text: #e6edf3; --muted: #8b949e;
@@ -85,6 +87,22 @@ tr.pick { background: var(--pick); }
 .score i.on { background: var(--accent); }
 .legend { display: flex; gap: 12px; font-size: 12px; color: var(--muted); margin-top: 6px; flex-wrap: wrap; }
 .legend i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 4px; border-radius: 2px; }
+.routine textarea { width: 100%; min-height: 150px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
+.routine .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+.btn { background: var(--accent); color: #0d1117; border: 0; border-radius: 6px; padding: 7px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); font-weight: 500; }
+.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: rot .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+@keyframes rot { to { transform: rotate(360deg); } }
+.steps { margin: 6px 0; padding-left: 18px; color: var(--muted); font-size: 12px; max-height: 140px; overflow-y: auto; }
+.report { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 6px; overflow: auto; max-height: 560px; }
+.report table { width: auto; margin: 8px 0; }
+.report th, .report td { text-align: left; }
+.report th { position: static; }
+.report h1, .report h2, .report h3 { font-size: 15px; text-transform: none; letter-spacing: 0; color: var(--text); margin: 14px 0 6px; }
+.report code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+.report a { color: var(--accent); }
+details.prompt summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
 footer { color: var(--muted); font-size: 12px; margin: 16px 0 24px; }
 .why { color: var(--muted); font-size: 12px; margin-top: 6px; }
 @media (max-width: 600px) { .chart { height: 240px; } .chart.tall { height: 280px; } }
@@ -106,6 +124,20 @@ footer { color: var(--muted); font-size: 12px; margin: 16px 0 24px; }
   </header>
 
   <div id="banners"></div>
+  <div class="panel routine" style="margin-bottom:12px">
+    <h2>Intraday routine · run by Claude with /trader-india</h2>
+    <details class="prompt" id="promptbox"><summary>Prompt (edit to change capital, max loss or rules; it is remembered in this browser)</summary>
+      <textarea id="prompt" spellcheck="false"></textarea>
+      <div class="bar"><button class="btn ghost" id="reset">Reset to the default prompt</button></div>
+    </details>
+    <div class="bar">
+      <button class="btn" id="run">↻ Refresh: run the routine</button>
+      <button class="btn ghost" id="stop" hidden>Stop</button>
+      <span class="meta" id="runstatus"></span>
+    </div>
+    <ol class="steps" id="steps" hidden></ol>
+    <div class="report" id="report" hidden></div>
+  </div>
   <div class="panel" style="margin-bottom:12px"><div class="regime" id="regime"><span class="meta">Reading the market (daily trend, VIX, breadth, FII/DII)…</span></div></div>
   <div class="cards" id="cards"></div>
 
@@ -218,8 +250,10 @@ async function tick() {
   try { t = await (await fetch("/api/tick")).json(); } catch (e) { $("dot").className = "live dead"; $("tickinfo").textContent = "server not answering"; return; }
   const dot = $("dot");
   const slow = (t.interval || 1) > 1;
-  dot.className = "live" + (slow ? " stale" : "");
-  $("tickinfo").textContent = slow ? `price feed slowed to every ${t.interval}s (Yahoo pushing back)` : `live · ${t.NIFTY ? t.NIFTY.time_ist : "–"} IST`;
+  const closed = state && state.status && !state.status.open;
+  dot.className = "live" + (slow || closed ? " stale" : "");
+  $("tickinfo").textContent = closed ? `market closed · last price ${t.NIFTY ? t.NIFTY.time_ist : "–"} IST`
+    : slow ? `price feed slowed to every ${t.interval}s (Yahoo pushing back)` : `live · ${t.NIFTY ? t.NIFTY.time_ist : "–"} IST`;
   for (const sym of ["NIFTY", "BANKNIFTY"]) {
     const q = t[sym];
     if (!q) continue;
@@ -454,6 +488,61 @@ for (const id of ["capital", "maxloss"]) {
   if (saved) $(id).value = saved;
   $(id).addEventListener("change", () => { store.set("nse-desk-" + id, $(id).value); refresh(); });
 }
+// ---------------------------------------------------------------- the routine box
+let defaultPrompt = "", runTimer = null, shownResult = null;
+const md = (text) => window.marked && window.DOMPurify ? DOMPurify.sanitize(marked.parse(text)) : `<pre>${esc(text)}</pre>`;
+
+function showRun(r) {
+  const running = r.status === "running";
+  $("run").disabled = running || !r.claude;
+  $("stop").hidden = !running;
+  const steps = r.steps || [];
+  $("steps").hidden = !steps.length || r.status === "done";
+  $("steps").innerHTML = steps.map((s) => `<li>${esc(s)}</li>`).join("");
+  $("steps").scrollTop = 1e6;
+  const cost = r.cost != null ? ` · cost $${Number(r.cost).toFixed(2)}` : "";
+  if (!r.claude) $("runstatus").innerHTML = `<span class="down">Claude Code was not found on this computer.</span> Install it, or start the dashboard with <code>--claude /path/to/claude</code>.`;
+  else if (running) $("runstatus").innerHTML = `<span class="spin"></span>Running since ${esc(r.started)} · ${r.elapsed || 0}s · ${steps.length} step(s). A full routine takes about 1 to 3 minutes.`;
+  else if (r.status === "done") $("runstatus").textContent = `Last run ${r.started} to ${r.finished} (${r.elapsed}s${r.turns ? ", " + r.turns + " turns" : ""})${cost}. Click Refresh to run it again with live data.`;
+  else if (r.status === "error") $("runstatus").innerHTML = `<span class="down">The run did not finish: ${esc(r.error)}</span>${cost}`;
+  else $("runstatus").textContent = "Click Refresh to run the routine with live data. Each run is a Claude Code request and costs about what one chat answer does.";
+  if (r.status === "done" && r.result !== shownResult) {
+    shownResult = r.result;
+    $("report").innerHTML = md(r.result);
+    $("report").hidden = false;
+  }
+  clearTimeout(runTimer);
+  if (running) runTimer = setTimeout(pollRun, 2000);
+}
+
+async function pollRun() {
+  try { showRun(await (await fetch("/api/run")).json()); } catch (e) { runTimer = setTimeout(pollRun, 5000); }
+}
+
+$("run").addEventListener("click", async () => {
+  const prompt = $("prompt").value.trim() || defaultPrompt;
+  $("run").disabled = true;
+  refresh();
+  try {
+    const r = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error);
+    showRun(j);
+  } catch (e) {
+    $("runstatus").innerHTML = `<span class="down">${esc(e.message)}</span>`;
+    $("run").disabled = false;
+  }
+});
+$("stop").addEventListener("click", () => fetch("/api/run/stop", { method: "POST" }).then(pollRun));
+$("reset").addEventListener("click", () => { $("prompt").value = defaultPrompt; store.set("nse-desk-prompt", ""); });
+$("prompt").addEventListener("change", () => store.set("nse-desk-prompt", $("prompt").value === defaultPrompt ? "" : $("prompt").value));
+
+fetch("/api/run").then((r) => r.json()).then((r) => {
+  defaultPrompt = r.default_prompt || "";
+  $("prompt").value = store.get("nse-desk-prompt") || defaultPrompt;
+  showRun(r);
+}).catch(() => {});
+
 refresh();
 setInterval(refresh, 30000);
 setInterval(tick, 1000);

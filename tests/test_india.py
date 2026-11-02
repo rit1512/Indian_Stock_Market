@@ -469,7 +469,10 @@ class Market(unittest.TestCase):
         self.assertEqual(tech.market_regime(up, 12)["regime"], "bullish")
 
     def test_results_calendar(self):
-        ev = tech.parse_events(india.nse_doc("event-calendar", LIVE))
+        path = tech.events_path(D(2026, 10, 28), 7)
+        self.assertEqual(path, "event-calendar?index=equities&from_date=28-10-2026&to_date=04-11-2026")
+        self.assertEqual(india.offline_name(path), "event-calendar")   # not "equities"
+        ev = tech.parse_events(india.nse_doc(path, LIVE))
         self.assertEqual(len(ev), 23)
         today = D(2026, 10, 27)
         self.assertEqual(tech.next_event(ev, "BEL", today, 15),
@@ -648,6 +651,147 @@ class Dashboard(unittest.TestCase):
                 src = fh.read().lower()
             for word in ("place_order", "placeorder", "kite.trade", "/orders"):
                 self.assertNotIn(word, src, f)
+
+
+def run_tech(argv):
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = tech.main(argv)
+    return code, out.getvalue(), err.getvalue()
+
+
+FAKE_CLAUDE = r'''#!/usr/bin/env python3
+import json, sys, time
+args = sys.argv[1:]
+if "SLOW" in args[1]:
+    time.sleep(30)
+print(json.dumps({"type": "system", "subtype": "init"}))
+print("not json, ignored")
+print(json.dumps({"type": "assistant", "message": {"content": [
+    {"type": "tool_use", "name": "Bash", "input": {"command": "python3 india.py clock --live", "description": "NSE clock"}}]}}))
+print(json.dumps({"type": "assistant", "message": {"content": [
+    {"type": "tool_use", "name": "WebSearch", "input": {"query": "GIFT Nifty today"}}]}}))
+fail = "FAIL" in args[1]
+print(json.dumps({"type": "result", "is_error": fail, "result": "## Report\n| a | b |\n|---|---|\n| 1 | 2 |\n" + json.dumps(args),
+                  "total_cost_usd": 0.42, "num_turns": 5}))
+'''
+
+
+class Routine(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.dash = load("trader-india", "dashboard")
+        cls.tmp = tempfile.mkdtemp()
+        cls.fake = os.path.join(cls.tmp, "claude")
+        with open(cls.fake, "w") as fh:
+            fh.write(FAKE_CLAUDE)
+        os.chmod(cls.fake, 0o755)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def wait(self, runner, secs=10):
+        import time
+        t = time.time()
+        while runner.snapshot()["status"] == "running" and time.time() - t < secs:
+            time.sleep(0.05)
+        return runner.snapshot()
+
+    def test_default_prompt_is_the_routine(self):
+        p = self.dash.DEFAULT_PROMPT
+        self.assertTrue(p.startswith("/trader-india Run my full Indian intraday routine"))
+        self.assertIn("Capital Rs 50,000 and max loss Rs 500", p)
+        self.assertIn("Do not place any order.", p)
+
+    def test_run_collects_steps_result_and_cost(self):
+        r = self.dash.Runner(self.fake, self.tmp)
+        r.start("")   # empty -> the default prompt
+        s = self.wait(r)
+        self.assertEqual(s["status"], "done")
+        again = self.dash.Runner(self.fake, self.tmp)   # a restart keeps the last report
+        self.assertEqual((again.snapshot()["status"], again.snapshot()["result"]), ("done", s["result"]))
+        self.assertEqual(s["steps"], ["Bash: NSE clock", "WebSearch: GIFT Nifty today"])
+        self.assertEqual((s["cost"], s["turns"]), (0.42, 5))
+        self.assertIn("## Report", s["result"])
+        args = json.loads(s["result"].splitlines()[-1])
+        self.assertEqual(args[0], "-p")
+        self.assertEqual(args[1], self.dash.DEFAULT_PROMPT)
+        self.assertEqual(args[2:5], ["--output-format", "stream-json", "--verbose"])
+        allowed = args[args.index("--allowedTools") + 1:]
+        self.assertEqual(allowed, self.dash.ALLOWED_TOOLS)
+        self.assertFalse(any(t.startswith(("Edit", "Write", "mcp")) for t in allowed))
+
+    def test_events_command_flags_today(self):
+        code, out, _ = run_tech(["events", "--offline", LIVE, "--now", "2026-10-28 10:00", "--days", "1"])
+        self.assertEqual(code, 0)
+        self.assertIn("HINDUNILVR  2026-10-28  Financial Results/Dividend", out)
+        self.assertIn("TODAY: results-day swings, no intraday entry", out)
+        self.assertIn("TRENT       2026-10-29", out)
+        self.assertNotIn("BEL ", out)
+
+    def test_failed_run(self):
+        r = self.dash.Runner(self.fake, self.tmp, save=None)
+        r.start("FAIL please")
+        s = self.wait(r)
+        self.assertEqual((s["status"], s["cost"]), ("error", 0.42))
+
+    def test_one_run_at_a_time_and_stop(self):
+        r = self.dash.Runner(self.fake, self.tmp)
+        r.start("SLOW")
+        with self.assertRaises(RuntimeError):
+            r.start("again")
+        self.assertTrue(r.stop())
+        s = self.wait(r)
+        self.assertEqual((s["status"], s["error"]), ("error", "stopped"))
+
+    def test_no_claude(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self.dash.Runner(None).start("x")
+        self.assertIn("not found", str(cm.exception))
+
+    def test_only_the_dashboard_page_can_start_a_run(self):
+        import threading
+        import urllib.request
+        hub = self.dash.Hub(LIVE, "2026-10-28 09:40", "/nonexistent")
+        runner = self.dash.Runner(self.fake, self.tmp)
+        srv = self.dash.ThreadingHTTPServer(("127.0.0.1", 0), self.dash.make_handler(hub, runner))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        port = srv.server_address[1]
+        base = "http://127.0.0.1:%d" % port
+
+        def post(origin):
+            req = urllib.request.Request(base + "/api/run", data=b'{"prompt": "hi"}', method="POST",
+                                         headers={"Content-Type": "application/json", "Origin": origin})
+            try:
+                with urllib.request.urlopen(req) as resp:
+                    return resp.status
+            except urllib.error.HTTPError as e:
+                e.close()
+                return e.code
+        try:
+            self.assertEqual(post("https://evil.example"), 403)
+            self.assertEqual(runner.snapshot()["status"], "idle")
+            self.assertEqual(post(base), 202)
+            self.assertEqual(self.wait(runner)["status"], "done")
+            with urllib.request.urlopen(base + "/api/run") as resp:
+                s = json.loads(resp.read().decode())
+            self.assertEqual(s["default_prompt"], self.dash.DEFAULT_PROMPT)
+            self.assertEqual(s["steps"][0], "Bash: NSE clock")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_find_claude_prefers_the_env(self):
+        old = os.environ.get("CLAUDE_BIN")
+        os.environ["CLAUDE_BIN"] = self.fake
+        try:
+            self.assertEqual(self.dash.find_claude(), self.fake)
+        finally:
+            if old is None:
+                os.environ.pop("CLAUDE_BIN")
+            else:
+                os.environ["CLAUDE_BIN"] = old
 
 
 class Network(unittest.TestCase):

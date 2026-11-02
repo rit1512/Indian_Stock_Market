@@ -43,6 +43,7 @@ import io
 import json
 import os
 import re
+import ssl
 import sys
 import time
 import urllib.error
@@ -119,6 +120,20 @@ DELIVERY = dict(CHARGES, brokerage_pct=0.0, brokerage_max=0.0,   # equity delive
 
 class IndiaError(Exception):
     pass
+
+
+def _use_system_certs():
+    """python.org's macOS Python ships without CA certificates until you run its Install
+    Certificates command, and every HTTPS request fails. Point it at macOS's own bundle."""
+    paths = ssl.get_default_verify_paths()
+    if os.environ.get("SSL_CERT_FILE") or (paths.cafile and os.path.exists(paths.cafile)) \
+            or os.path.exists(paths.openssl_cafile):
+        return
+    if os.path.exists("/etc/ssl/cert.pem"):
+        os.environ["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
+
+
+_use_system_certs()
 
 
 # ---------------------------------------------------------------- time
@@ -370,7 +385,7 @@ def offline_name(path):
     option-chain-v3?type=Indices&symbol=NIFTY&expiry=03-Nov-2026 -> option-chain-v3-NIFTY-03-Nov-2026."""
     base, _, query = path.partition("?")
     q = urllib.parse.parse_qs(query)
-    if "index" in q:
+    if "index" in q and base == "live-analysis-variations":
         return q["index"][0]
     return "-".join([base] + [q[k][0] for k in ("symbol", "expiry") if k in q])
 

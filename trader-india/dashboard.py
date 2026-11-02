@@ -17,15 +17,24 @@ Every request is one at a time per loop, half a second apart. The page asks for 
 second and for everything else every 30 seconds. Setups are worked out on each request, so
 changing capital or max loss on the page re-sizes them at once.
 
-It listens on 127.0.0.1 only. It places no orders: there is no order code in it.
+The "Run the routine" box sends a prompt to Claude Code (the `claude` command, or the one inside
+the VS Code extension) in print mode, with tools limited to the trader-india scripts, reading,
+and web search. One run at a time; each run costs what Claude Code charges, and the page shows it.
+
+It listens on 127.0.0.1 only and refuses a run started from any other web page. It places no
+orders: there is no order code in it, and the Claude run gets no order tool.
 """
 
 import argparse
 import csv
 import datetime
+import glob
 import io
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -187,7 +196,8 @@ class Hub(object):
         with self.lock:
             syms = list(self.data.get("universe") or [])
             have_fund = dict(self.data["fund"])
-        ev = self._try("events", lambda: tech.parse_events(india.nse_doc("event-calendar", off), set(syms)))
+        ev = self._try("events", lambda: tech.parse_events(
+            india.nse_doc(tech.events_path(self.now_ist().date()), off), set(syms)))
         if ev is not None:
             self.put("events", ev)
         todo = ["NIFTY"] + syms
@@ -345,10 +355,145 @@ def _pct_today(bars, day, cutoff):
     return round(100.0 * (sb[-1]["c"] / before[-1]["c"] - 1), 2)
 
 
+# ---------------------------------------------------------------- the routine, run by Claude
+
+DEFAULT_PROMPT = """/trader-india Run my full Indian intraday routine, one step at a time, using live data:
+
+1. Clock: is the NSE open right now? If it is closed, tell me when it opens and that everything below is from the last session.
+2. Market backdrop: NIFTY 50, BANK NIFTY, FIN NIFTY, INDIA VIX and advances/declines.
+3. Movers: top 5 gainers and losers in NIFTY and BANKNIFTY.
+4. Scan: 15-minute opening-range breakouts and breakdowns across the NIFTY 50, with bars complete by now.
+5. For the 3 strongest breakouts: entry = the breakout close, stop = the other side of the opening range, target = 2 times the risk. Size each one for Capital Rs 50,000 and max loss Rs 500 per trade, NSE intraday charges included.
+6. Check each one against my rules: max 3 trades a day, no entries after 14:45, flat by 15:10. Say PASS or BLOCK and why.
+7. Show a final table: symbol, entry, stop, target, quantity, rupees at risk, charges, reward to risk, PASS/BLOCK.
+
+Do not place any order. Show prices with their IST time. Long trades only."""
+
+# what the Claude run may do without asking: run the skill's scripts, read, search the web
+ALLOWED_TOOLS = ["Bash(python3:*)", "Bash(/usr/bin/python3:*)", "Read", "Grep", "Glob", "Skill",
+                 "WebSearch", "WebFetch"]
+RUN_TIMEOUT = 600   # seconds
+
+
+def find_claude():
+    """$CLAUDE_BIN, `claude` on the PATH, or the newest binary inside the VS Code extension."""
+    if os.environ.get("CLAUDE_BIN") and os.path.exists(os.environ["CLAUDE_BIN"]):
+        return os.environ["CLAUDE_BIN"]
+    on_path = shutil.which("claude")
+    if on_path:
+        return on_path
+    found = glob.glob(os.path.expanduser("~/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/claude"))
+
+    def version(p):
+        m = re.search(r"claude-code-(\d+)\.(\d+)\.(\d+)", p)
+        return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+    return max(found, key=version) if found else None
+
+
+class Runner(object):
+    """One Claude Code run at a time, read line by line from its stream-json output."""
+
+    def __init__(self, claude=None, cwd=None, save="trader/india/last-routine.json"):
+        self.claude, self.cwd = claude, cwd or os.getcwd()
+        self.save = os.path.join(self.cwd, save) if save else None
+        self.lock = threading.Lock()
+        self.proc = None
+        self.state = {"status": "idle"}
+        last = india._read(self.save, None) if self.save else None   # the last report survives a restart
+        if isinstance(last, dict) and last.get("status") == "done":
+            self.state = last
+
+    def snapshot(self):
+        with self.lock:
+            s = dict(self.state, steps=list(self.state.get("steps") or []))
+        if s["status"] == "running":
+            s["elapsed"] = int(time.time() - s["t0"])
+        s["claude"] = self.claude
+        return s
+
+    def start(self, prompt):
+        prompt = (prompt or "").strip() or DEFAULT_PROMPT
+        with self.lock:
+            if self.state["status"] == "running":
+                raise RuntimeError("a run is already going: wait for it or stop it")
+            if not self.claude:
+                raise RuntimeError("Claude Code was not found: install it, or start the dashboard with "
+                                   "CLAUDE_BIN=/path/to/claude")
+            cmd = [self.claude, "-p", prompt, "--output-format", "stream-json", "--verbose",
+                   "--allowedTools"] + ALLOWED_TOOLS
+            env = dict(os.environ)
+            if os.path.exists("/etc/ssl/cert.pem"):
+                env.setdefault("SSL_CERT_FILE", "/etc/ssl/cert.pem")
+            self.proc = subprocess.Popen(cmd, cwd=self.cwd, env=env, stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            self.state = {"status": "running", "prompt": prompt, "t0": time.time(), "steps": [],
+                          "started": datetime.datetime.now().strftime("%H:%M:%S")}
+        threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()
+        threading.Thread(target=self._watchdog, args=(self.proc,), daemon=True).start()
+
+    def stop(self):
+        with self.lock:
+            p = self.proc
+        if p and p.poll() is None:
+            p.terminate()
+            return True
+        return False
+
+    def _watchdog(self, p):
+        try:
+            p.wait(RUN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+    def _step(self, text):
+        with self.lock:
+            self.state.setdefault("steps", []).append(text[:300])
+
+    def _read(self, p):
+        result, other = None, []
+        for line in p.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                other.append(line)
+                continue
+            if ev.get("type") == "assistant":
+                for c in (ev.get("message") or {}).get("content") or []:
+                    if c.get("type") == "tool_use":
+                        inp = c.get("input") or {}
+                        what = inp.get("description") or inp.get("command") or inp.get("query") \
+                            or inp.get("skill") or inp.get("url") or inp.get("file_path") or ""
+                        self._step("%s: %s" % (c.get("name"), what))
+            elif ev.get("type") == "result":
+                result = ev
+        code = p.wait()
+        with self.lock:
+            st = self.state
+            st["elapsed"] = int(time.time() - st["t0"])
+            st["finished"] = datetime.datetime.now().strftime("%H:%M:%S")
+            if result and not result.get("is_error"):
+                st.update(status="done", result=result.get("result") or "", cost=result.get("total_cost_usd"),
+                          turns=result.get("num_turns"))
+            else:
+                msg = (result or {}).get("result") or " ".join(other[-3:]) or "Claude Code exited with %s" % code
+                if code and code < 0:
+                    msg = "stopped"
+                st.update(status="error", error=msg, cost=(result or {}).get("total_cost_usd"))
+            done = dict(st) if st["status"] == "done" and self.save else None
+        if done:
+            try:
+                india._write(self.save, done)
+            except OSError:
+                pass
+
+
 PAGE = os.path.join(HERE, "dashboard.html")
 
 
-def make_handler(hub):
+def make_handler(hub, runner=None):
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -383,10 +528,31 @@ def make_handler(hub):
                 if u.path == "/api/chart":
                     c = hub.chart((q.get("symbol") or [""])[0].upper(), (q.get("tf") or ["5m"])[0])
                     return self.send(200 if c else 404, json.dumps(c or {"error": "no bars yet for that symbol"}))
+                if u.path == "/api/run" and runner:
+                    return self.send(200, json.dumps(dict(runner.snapshot(), default_prompt=DEFAULT_PROMPT)))
                 return self.send(404, json.dumps({"error": "not found"}))
             except Exception as e:
                 traceback.print_exc()
                 return self.send(500, json.dumps({"error": "%s: %s" % (type(e).__name__, e)}))
+
+        def do_POST(self):
+            u = urllib.parse.urlparse(self.path)
+            # a run costs money: only this page may start one, not another site open in the browser
+            host = self.server.server_address
+            mine = ("http://127.0.0.1:%d" % host[1], "http://localhost:%d" % host[1])
+            if self.headers.get("Origin") not in mine:
+                return self.send(403, json.dumps({"error": "runs can only be started from the dashboard page"}))
+            if not runner or u.path not in ("/api/run", "/api/run/stop"):
+                return self.send(404, json.dumps({"error": "not found"}))
+            try:
+                if u.path == "/api/run/stop":
+                    return self.send(200, json.dumps({"stopped": runner.stop()}))
+                n = min(int(self.headers.get("Content-Length") or 0), 20000)
+                body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+                runner.start(body.get("prompt"))
+                return self.send(202, json.dumps(runner.snapshot()))
+            except (RuntimeError, ValueError, OSError) as e:
+                return self.send(409, json.dumps({"error": str(e)}))
     return H
 
 
@@ -397,13 +563,16 @@ def main(argv=None):
     ap.add_argument("--offline", metavar="DIR", help="read saved files once, no network")
     ap.add_argument("--now", help="pretend it is this time (no offset = IST)")
     ap.add_argument("--no-open", action="store_true", help="do not open the browser")
+    ap.add_argument("--claude", help="the claude binary for the routine box (default: found by itself)")
     a = ap.parse_args(argv)
     hub = Hub(a.offline, a.now, a.config)
+    runner = Runner(a.claude or find_claude())
+    print("Routine box: %s" % (runner.claude or "Claude Code not found, the box will say so"))
     print("Reading NSE and Yahoo (the first NIFTY 50 scan takes about 35 seconds, the short-term screen "
           "about a minute more)...")
     for fn, every in ((hub.tick, TICK), (hub.fast, FAST), (hub.slow, SLOW), (hub.daily, DAILY)):
         threading.Thread(target=hub.loop, args=(fn, every), daemon=True).start()
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(hub))
+    srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(hub, runner))
     url = "http://127.0.0.1:%d/" % a.port
     print("Dashboard: %s  (Ctrl+C to stop)" % url)
     if not a.no_open:
